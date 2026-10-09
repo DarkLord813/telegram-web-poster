@@ -8,6 +8,8 @@ import json
 import random
 import re
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from contextlib import contextmanager
@@ -97,6 +99,30 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+# ======================== HEALTH CHECK SERVER ========================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/health' or self.path == '/' or self.path == '/healthz':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        pass  # Silence health check logs
+
+def run_health_server():
+    port = int(os.environ.get('PORT', 8080))
+    try:
+        server = HTTPServer(('0.0.0.0', port), HealthHandler)
+        logger.info(f"✅ Health server listening on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Health server error: {e}")
 
 # ======================== TIMEZONE HELPERS ========================
 
@@ -275,7 +301,6 @@ class Database:
             
             conn.commit()
     
-    # ===== USER OPERATIONS =====
     def get_user(self, user_id: int) -> Optional[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -325,7 +350,6 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
-    # ===== WEBSITE OPERATIONS =====
     def add_website(self, user_id: int, website_url: str, feed_url: str, name: str) -> int:
         now = datetime.now(pytz.UTC).isoformat()
         with self.get_connection() as conn:
@@ -399,7 +423,6 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
-    # ===== CHANNEL OPERATIONS =====
     def add_channel(self, channel_id: str, channel_name: str, user_id: int, website_id: int):
         now = datetime.now(pytz.UTC).isoformat()
         with self.get_connection() as conn:
@@ -444,7 +467,6 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
-    # ===== POST OPERATIONS =====
     def get_next_user_post_id(self, user_id: int) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -495,14 +517,6 @@ class Database:
                 WHERE bp.user_id = ?
                 ORDER BY bp.user_post_id DESC LIMIT ?
             ''', (user_id, limit))
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    def get_posts_by_website(self, user_id: int, website_id: int) -> List[Dict]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM blog_posts WHERE user_id = ? AND website_id = ? ORDER BY user_post_id DESC',
-                         (user_id, website_id))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
@@ -565,7 +579,6 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
-    # ===== PENDING POSTS =====
     def schedule_post(self, post_id: str, channel_id: str, scheduled_time: str, priority: int = 0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -818,9 +831,6 @@ def get_post_action_keyboard() -> ReplyKeyboardMarkup:
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
-def get_cancel_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-
 # ======================== CANCEL FUNCTIONS ========================
 
 async def cancel_add_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -934,8 +944,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
    • ID - Enter channel ID
 
 <b>⚡ Auto-Post (Immediate):</b>
-• When new posts are detected in your website
-• They are sent to your channel <b>immediately</b>
+• New posts are detected and sent to your channel <b>immediately</b>
 • You get a notification when new posts are found
 
 <b>📤 Post Preview:</b>
@@ -951,17 +960,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 <b>⏰ Setting Timezone:</b>
 1. Click 'Set Timezone'
 2. Select your region and timezone
-3. All schedules will use your local time
 
 <b>📊 View Posts:</b>
 • See all posts from your websites
-• Each post has a unique ID (1, 2, 3...)
-
-<b>📤 Manage Posts:</b>
-• Select any post by entering its ID
-• View preview with image
-• Send immediately to any channel
-• Schedule for later
 
 <b>⏰ Your Timezone:</b> <code>{user_tz}</code>
 """
@@ -975,8 +976,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def set_timezone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         text = "⏰ <b>Set Your Timezone</b>\n\n"
-        text += "Select your region to set your local timezone.\n\n"
-        text += "🌍 <b>Select your region:</b>"
+        text += "Select your region:\n\n"
         
         keyboard = [
             ['🌍 Africa', '🌎 Americas'],
@@ -1036,22 +1036,16 @@ async def handle_timezone_region(update: Update, context: ContextTypes.DEFAULT_T
                 keyboard.append([display])
             keyboard.append([CANCEL_BUTTON])
             
-            await send_html(
-                update,
-                "⏰ <b>Select your timezone:</b>",
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
+            await send_html(update, "⏰ <b>Select your timezone:</b>",
+                          reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
         else:
-            await send_html(
-                update,
-                "❌ Please select a valid region.",
-                reply_markup=ReplyKeyboardMarkup([
-                    ['🌍 Africa', '🌎 Americas'],
-                    ['🌏 Asia', '🌏 Asia/Pacific'],
-                    ['🌍 Europe', '🌐 Other'],
-                    [CANCEL_BUTTON]
-                ], resize_keyboard=True)
-            )
+            await send_html(update, "❌ Please select a valid region.",
+                          reply_markup=ReplyKeyboardMarkup([
+                              ['🌍 Africa', '🌎 Americas'],
+                              ['🌏 Asia', '🌏 Asia/Pacific'],
+                              ['🌍 Europe', '🌐 Other'],
+                              [CANCEL_BUTTON]
+                          ], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in handle_timezone_region: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1079,19 +1073,15 @@ async def handle_timezone_selection(update: Update, context: ContextTypes.DEFAUL
             
             await send_html(
                 update,
-                f"✅ <b>Timezone Set Successfully!</b>\n\n"
+                f"✅ <b>Timezone Set!</b>\n\n"
                 f"🕐 Timezone: <code>{selected_tz}</code>\n"
                 f"📅 Date: {date_str}\n"
-                f"⏰ Time: {time_str}\n\n"
-                f"All schedules will now use your local timezone!",
+                f"⏰ Time: {time_str}",
                 reply_markup=get_main_keyboard(user_id)
             )
         else:
-            await send_html(
-                update,
-                "❌ Invalid timezone. Please try again.",
-                reply_markup=ReplyKeyboardMarkup([['🌍 Africa', '🌎 Americas'], ['🌏 Asia', '🌏 Asia/Pacific'], ['🌍 Europe', '🌐 Other'], [CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, "❌ Invalid timezone. Please try again.",
+                          reply_markup=ReplyKeyboardMarkup([['🌍 Africa', '🌎 Americas'], ['🌏 Asia', '🌏 Asia/Pacific'], ['🌍 Europe', '🌐 Other'], [CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in handle_timezone_selection: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1154,18 +1144,17 @@ async def delete_website_start(update: Update, context: ContextTypes.DEFAULT_TYP
         websites = db.get_user_websites(user_id)
         
         if not websites:
-            await send_html(update, "🌐 No websites to delete.",
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "🌐 No websites to delete.", reply_markup=get_main_keyboard(user_id))
             return
         
         text = "🗑 <b>Delete Website</b>\n\n"
-        text += "Select the website to delete by entering its number:\n\n"
+        text += "Select website to delete by entering its number:\n\n"
         
         for i, site in enumerate(websites, 1):
             text += f"{i}. <b>{site['name']}</b>\n"
             text += f"   🔗 {site['website_url']}\n\n"
         
-        text += f"\n📝 Send the <b>website number</b> or click {CANCEL_BUTTON}"
+        text += f"\n📝 Send the website number or click {CANCEL_BUTTON}"
         
         context.user_data['awaiting_website_delete'] = True
         context.user_data['websites_list'] = websites
@@ -1340,7 +1329,7 @@ async def handle_post_id_input(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Error in handle_post_id_input: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
 
-# ======================== SEND NOW ========================
+# ======================== SEND NOW / SCHEDULE ========================
 
 async def handle_send_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -1377,8 +1366,6 @@ async def handle_send_now(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.error(f"Error in handle_send_now: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
 
-# ======================== SCHEDULE POST ========================
-
 async def handle_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = update.effective_user.id
@@ -1392,8 +1379,7 @@ async def handle_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYP
         channels = db.get_user_channels(user_id)
         
         if not channels:
-            await send_html(update, "❌ No channels found. Add a channel first!",
-                          reply_markup=get_post_action_keyboard())
+            await send_html(update, "❌ No channels found.", reply_markup=get_post_action_keyboard())
             return
         
         text = f"⏰ <b>Schedule Post #{post_id}</b>\n\n"
@@ -1490,7 +1476,7 @@ async def handle_channel_selection(update: Update, context: ContextTypes.DEFAULT
                 update,
                 f"⏰ <b>Schedule Post #{post_id}</b>\n\n"
                 f"📢 Channel: <code>{selected_channel['channel_name']}</code>\n\n"
-                f"Send the time (24-hour format) in your local timezone:\n"
+                f"Send the time (24h format) in your timezone:\n"
                 f"⏰ Timezone: <code>{user_tz}</code>\n"
                 f"Example: <code>14:30</code>\n\n"
                 f"Or click {CANCEL_BUTTON}",
@@ -1513,7 +1499,7 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         
         if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', text):
-            await send_html(update, f"❌ Invalid time. Use HH:MM (e.g., 14:30). Click {CANCEL_BUTTON} to cancel",
+            await send_html(update, f"❌ Invalid time. Use HH:MM. Click {CANCEL_BUTTON} to cancel",
                           reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
@@ -1559,8 +1545,7 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
             f"📌 {post['title'][:50]}\n"
             f"📢 Channel: <code>{channel_id}</code>\n"
             f"🕐 Time: {text} ({user_tz})\n"
-            f"📅 Date: {display_time}\n\n"
-            f"You'll be notified 5 minutes before!",
+            f"📅 Date: {display_time}",
             reply_markup=get_main_keyboard(user_id)
         )
     except Exception as e:
@@ -1575,8 +1560,7 @@ async def add_website_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "🌐 <b>Add Website</b>\n\n"
         "Send me the website URL:\n"
         "• <code>https://example.com</code>\n"
-        "• <code>pspgamers5.blogspot.com</code>\n"
-        "• <code>https://news.site/feed</code>\n\n"
+        "• <code>pspgamers5.blogspot.com</code>\n\n"
         "I'll auto-detect the RSS feed!",
         reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
     )
@@ -1618,9 +1602,7 @@ async def add_website_url(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 reply_markup=get_main_keyboard(update.effective_user.id)
             )
             
-            # Immediately check for new posts
             await check_website_feed(website_id, update.effective_user.id)
-            
             return ConversationHandler.END
         else:
             await send_html(
@@ -1646,8 +1628,7 @@ async def add_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         websites = db.get_user_websites(user_id)
         
         if not websites:
-            await send_html(update, "❌ Add a website first!",
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ Add a website first!", reply_markup=get_main_keyboard(user_id))
             return ConversationHandler.END
         
         text = "🌐 <b>Select website for this channel:</b>\n\n"
@@ -1949,8 +1930,7 @@ async def handle_website_schedule_selection(update: Update, context: ContextType
             f"🌐 {website['name']}\n"
             f"🕐 Time: {website['schedule_time']}\n"
             f"📊 Posts/Day: {website['posts_per_day']}\n\n"
-            f"⏰ Your Timezone: <code>{user_tz}</code>\n\n"
-            f"Select option:",
+            f"⏰ Your Timezone: <code>{user_tz}</code>",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         
@@ -2464,7 +2444,6 @@ async def check_website_feed(website_id: int, user_id: int):
             else:
                 logger.info(f"⚠️ No channels for {website['name']} - posts saved only")
             
-            # Notify user
             await notify_user_new_posts(user_id, new_posts, website)
     except Exception as e:
         logger.error(f"Error checking feed: {e}")
@@ -2686,6 +2665,11 @@ def main():
     
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    
+    # Start health server in background thread
+    health_thread = threading.Thread(target=run_health_server, daemon=True)
+    health_thread.start()
+    logger.info("🏥 Health server thread started")
     
     # Build application with LONG timeouts for Render
     application = (
