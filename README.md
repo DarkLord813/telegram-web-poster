@@ -64,8 +64,8 @@ pytz
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/website-auto-poster.git
-cd website-auto-poster
+git clone https://github.com/DarkLord813/telegram-web-poster.git
+cd telegram-web-poster
 ```
 
 ### 2. Create a Virtual Environment (Recommended)
@@ -100,7 +100,7 @@ Open `autopost.py` and update the `ADMIN_IDS` list:
 
 ```python
 ADMIN_IDS = [
-    7713987088,  # Your Telegram user ID
+    12345678,  # Your Telegram user ID
     # Add more admin IDs here
 ]
 ```
