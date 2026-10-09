@@ -1,6 +1,3 @@
-# website_auto_poster.py
-# Complete Telegram Bot - Website Auto-Poster with Immediate Auto-Post
-
 import os
 import logging
 import sqlite3
@@ -10,6 +7,7 @@ import hashlib
 import json
 import random
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from contextlib import contextmanager
@@ -39,7 +37,7 @@ ADMIN_IDS = [
 
 # Bot settings
 BOT_NAME = "WebAutoPoster™"
-CHECK_INTERVAL = 300  # 5 minutes - how often to check for new posts
+CHECK_INTERVAL = 300  # 5 minutes
 
 # Database file
 DB_FILE = 'web_auto_poster.db'
@@ -72,11 +70,11 @@ AWAITING_POSTS_COUNT = 24
 AWAITING_WEBSITE_DELETE = 25
 AWAITING_TIMEZONE = 26
 
+# Button constants
 CANCEL_BUTTON = '❌ Cancel'
 BACK_BUTTON = '🔙 Back'
 BACK_TO_MENU = '🔙 Back to Menu'
 
-# Menu button constants
 BTN_MY_WEBSITES = '🌐 My Websites'
 BTN_MY_CHANNELS = '📋 My Channels'
 BTN_ADD_WEBSITE = '➕ Add Website'
@@ -88,10 +86,10 @@ BTN_MANAGE_POSTS = '📤 Manage Posts'
 BTN_SCHEDULE_SETTINGS = '⏰ Schedule Settings'
 BTN_HELP = 'ℹ️ Help'
 BTN_ADMIN_PANEL = '🔧 Admin Panel'
-BTN_BACK_TO_MENU = '🔙 Back to Menu'
 BTN_SEND_NOW = '📤 Send Now'
 BTN_SCHEDULE = '⏰ Schedule'
 BTN_SET_TIME = '⏰ Set Time'
+BTN_YES_DELETE = '✅ Yes, Delete'
 
 # ======================== LOGGING ========================
 logging.basicConfig(
@@ -100,7 +98,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================== TIMEZONE HELPER FUNCTIONS ========================
+# ======================== TIMEZONE HELPERS ========================
 
 def get_user_timezone(user_id: int) -> str:
     user = db.get_user(user_id)
@@ -113,10 +111,7 @@ def get_user_timezone_obj(user_id: int):
     except:
         return pytz.UTC
 
-def get_current_utc() -> datetime:
-    return datetime.now(pytz.UTC)
-
-# ======================== HTML HELPER FUNCTIONS ========================
+# ======================== HTML HELPERS ========================
 
 async def send_html(update_or_context, text: str, parse_mode: str = 'HTML', **kwargs):
     try:
@@ -143,7 +138,7 @@ async def send_html_photo(update_or_context, photo: str, caption: str = None, **
             return await send_html(update_or_context, caption, **kwargs)
         return None
 
-# ======================== DATABASE CLASS ========================
+# ======================== DATABASE ========================
 
 class Database:
     def __init__(self, db_file: str):
@@ -239,8 +234,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     post_id TEXT,
                     channel_id TEXT,
-                    posted_at TEXT,
-                    FOREIGN KEY (post_id) REFERENCES blog_posts(post_id)
+                    posted_at TEXT
                 )
             ''')
             
@@ -251,8 +245,7 @@ class Database:
                     channel_id TEXT,
                     scheduled_time TEXT,
                     priority INTEGER DEFAULT 0,
-                    notified INTEGER DEFAULT 0,
-                    FOREIGN KEY (post_id) REFERENCES blog_posts(post_id)
+                    notified INTEGER DEFAULT 0
                 )
             ''')
             
@@ -269,21 +262,20 @@ class Database:
                 )
             ''')
             
+            # Indexes
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_websites_user ON websites(user_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_channels_website ON channels(website_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_website ON blog_posts(website_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_user ON blog_posts(user_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_hash ON blog_posts(post_hash)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_time ON pending_posts(scheduled_time)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_notified ON blog_posts(notified)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_status ON blog_posts(status)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_user_id ON blog_posts(user_post_id, user_id)')
-            cursor.execute('CREATE INDEX IF NOT EXISTS idx_pending_notified ON pending_posts(notified)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_auto_sent ON blog_posts(auto_sent)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_posts_notified_user ON blog_posts(notified_user)')
             
             conn.commit()
     
+    # ===== USER OPERATIONS =====
     def get_user(self, user_id: int) -> Optional[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -311,9 +303,8 @@ class Database:
     def update_user_timezone(self, user_id: int, timezone: str):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE users SET timezone = ?, updated_at = ? WHERE user_id = ?
-            ''', (timezone, datetime.now(pytz.UTC).isoformat(), user_id))
+            cursor.execute('UPDATE users SET timezone = ?, updated_at = ? WHERE user_id = ?',
+                         (timezone, datetime.now(pytz.UTC).isoformat(), user_id))
             conn.commit()
     
     def get_user_timezone(self, user_id: int) -> str:
@@ -334,6 +325,7 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
+    # ===== WEBSITE OPERATIONS =====
     def add_website(self, user_id: int, website_url: str, feed_url: str, name: str) -> int:
         now = datetime.now(pytz.UTC).isoformat()
         with self.get_connection() as conn:
@@ -373,7 +365,7 @@ class Database:
     def get_website_by_url(self, user_id: int, url: str) -> Optional[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('SELECT * FROM websites WHERE user_id = ? AND website_url = ? AND status = "active"', 
+            cursor.execute('SELECT * FROM websites WHERE user_id = ? AND website_url = ? AND status = "active"',
                          (user_id, url))
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -381,27 +373,23 @@ class Database:
     def delete_website(self, website_id: int, user_id: int) -> bool:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE websites SET status = 'deleted' 
-                WHERE id = ? AND user_id = ?
-            ''', (website_id, user_id))
+            cursor.execute('UPDATE websites SET status = "deleted" WHERE id = ? AND user_id = ?',
+                         (website_id, user_id))
             conn.commit()
             return cursor.rowcount > 0
     
     def update_website_schedule(self, website_id: int, schedule_time: str, posts_per_day: int):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE websites SET schedule_time = ?, posts_per_day = ? WHERE id = ?
-            ''', (schedule_time, posts_per_day, website_id))
+            cursor.execute('UPDATE websites SET schedule_time = ?, posts_per_day = ? WHERE id = ?',
+                         (schedule_time, posts_per_day, website_id))
             conn.commit()
     
     def update_website_last_checked(self, website_id: int):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE websites SET last_checked = ? WHERE id = ?
-            ''', (datetime.now(pytz.UTC).isoformat(), website_id))
+            cursor.execute('UPDATE websites SET last_checked = ? WHERE id = ?',
+                         (datetime.now(pytz.UTC).isoformat(), website_id))
             conn.commit()
     
     def get_websites_count(self) -> int:
@@ -411,6 +399,7 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
+    # ===== CHANNEL OPERATIONS =====
     def add_channel(self, channel_id: str, channel_name: str, user_id: int, website_id: int):
         now = datetime.now(pytz.UTC).isoformat()
         with self.get_connection() as conn:
@@ -436,10 +425,8 @@ class Database:
     def get_website_channels(self, website_id: int) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM channels 
-                WHERE website_id = ? AND status = 'active'
-            ''', (website_id,))
+            cursor.execute('SELECT * FROM channels WHERE website_id = ? AND status = "active"',
+                         (website_id,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
@@ -450,13 +437,6 @@ class Database:
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
-    def remove_channel(self, channel_id: str, user_id: int):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE channels SET status = "inactive" WHERE channel_id = ? AND added_by = ?', 
-                         (channel_id, user_id))
-            conn.commit()
-    
     def get_channels_count(self) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -464,14 +444,12 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
+    # ===== POST OPERATIONS =====
     def get_next_user_post_id(self, user_id: int) -> int:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT MAX(user_post_id) as max_id 
-                FROM blog_posts 
-                WHERE user_id = ?
-            ''', (user_id,))
+            cursor.execute('SELECT MAX(user_post_id) as max_id FROM blog_posts WHERE user_id = ?',
+                         (user_id,))
             row = cursor.fetchone()
             max_id = row['max_id'] if row and row['max_id'] else 0
             return max_id + 1
@@ -498,14 +476,12 @@ class Database:
                 (user_post_id, user_id, website_id, post_id, title, link, description, content, 
                  thumbnail_url, image_urls, published_at, created_at, post_hash, notified, status, sent_count, auto_sent, notified_user)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', 0, 0, 0)
-            ''', (next_id, user_id, website_id, post_id, title, link, description, content, 
+            ''', (next_id, user_id, website_id, post_id, title, link, description, content,
                   thumbnail, images, published_at, datetime.now(pytz.UTC).isoformat(), post_hash))
             conn.commit()
             
-            cursor.execute('''
-                SELECT * FROM blog_posts 
-                WHERE post_id = ? AND user_id = ?
-            ''', (post_id, user_id))
+            cursor.execute('SELECT * FROM blog_posts WHERE post_id = ? AND user_id = ?',
+                         (post_id, user_id))
             saved_post = cursor.fetchone()
             return dict(saved_post) if saved_post else None
     
@@ -525,11 +501,8 @@ class Database:
     def get_posts_by_website(self, user_id: int, website_id: int) -> List[Dict]:
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT * FROM blog_posts 
-                WHERE user_id = ? AND website_id = ?
-                ORDER BY user_post_id DESC
-            ''', (user_id, website_id))
+            cursor.execute('SELECT * FROM blog_posts WHERE user_id = ? AND website_id = ? ORDER BY user_post_id DESC',
+                         (user_id, website_id))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
     
@@ -552,41 +525,18 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
     
-    def get_unnotified_posts_for_user(self, user_id: int) -> List[Dict]:
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT bp.*, w.name as website_name
-                FROM blog_posts bp
-                JOIN websites w ON bp.website_id = w.id
-                WHERE bp.user_id = ? AND bp.notified_user = 0 AND bp.auto_sent = 0
-                ORDER BY bp.id ASC
-            ''', (user_id,))
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    def mark_post_notified_user(self, post_id: str):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE blog_posts SET notified_user = 1 WHERE post_id = ?', (post_id,))
-            conn.commit()
-    
     def update_post_status(self, user_id: int, user_post_id: int, status: str):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE blog_posts SET status = ? 
-                WHERE user_id = ? AND user_post_id = ?
-            ''', (status, user_id, user_post_id))
+            cursor.execute('UPDATE blog_posts SET status = ? WHERE user_id = ? AND user_post_id = ?',
+                         (status, user_id, user_post_id))
             conn.commit()
     
     def increment_post_sent_count(self, user_id: int, user_post_id: int):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                UPDATE blog_posts SET sent_count = sent_count + 1 
-                WHERE user_id = ? AND user_post_id = ?
-            ''', (user_id, user_post_id))
+            cursor.execute('UPDATE blog_posts SET sent_count = sent_count + 1 WHERE user_id = ? AND user_post_id = ?',
+                         (user_id, user_post_id))
             conn.commit()
     
     def mark_auto_sent(self, post_id: str):
@@ -595,22 +545,10 @@ class Database:
             cursor.execute('UPDATE blog_posts SET auto_sent = 1 WHERE post_id = ?', (post_id,))
             conn.commit()
     
-    def get_unnotified_posts(self) -> List[Dict]:
+    def mark_post_notified_user(self, post_id: str):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                SELECT bp.*, w.name as website_name, w.user_id
-                FROM blog_posts bp
-                JOIN websites w ON bp.website_id = w.id
-                WHERE bp.notified = 0
-            ''')
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
-    
-    def mark_post_notified(self, post_id: str):
-        with self.get_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute('UPDATE blog_posts SET notified = 1 WHERE post_id = ?', (post_id,))
+            cursor.execute('UPDATE blog_posts SET notified_user = 1 WHERE post_id = ?', (post_id,))
             conn.commit()
     
     def get_posts_count(self) -> int:
@@ -627,6 +565,7 @@ class Database:
             row = cursor.fetchone()
             return row['count'] if row else 0
     
+    # ===== PENDING POSTS =====
     def schedule_post(self, post_id: str, channel_id: str, scheduled_time: str, priority: int = 0):
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -672,19 +611,16 @@ class Database:
     def mark_as_posted(self, post_id: str, channel_id: str):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('''
-                INSERT INTO posted_history (post_id, channel_id, posted_at)
-                VALUES (?, ?, ?)
-            ''', (post_id, channel_id, datetime.now(pytz.UTC).isoformat()))
-            cursor.execute('''
-                DELETE FROM pending_posts WHERE post_id = ? AND channel_id = ?
-            ''', (post_id, channel_id))
+            cursor.execute('INSERT INTO posted_history (post_id, channel_id, posted_at) VALUES (?, ?, ?)',
+                         (post_id, channel_id, datetime.now(pytz.UTC).isoformat()))
+            cursor.execute('DELETE FROM pending_posts WHERE post_id = ? AND channel_id = ?',
+                         (post_id, channel_id))
             conn.commit()
     
     def reschedule_post(self, pending_id: int, new_time: str):
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute('UPDATE pending_posts SET scheduled_time = ?, notified = 0 WHERE id = ?', 
+            cursor.execute('UPDATE pending_posts SET scheduled_time = ?, notified = 0 WHERE id = ?',
                          (new_time, pending_id))
             conn.commit()
     
@@ -723,36 +659,40 @@ class WebsiteDetector:
             '/?feed=atom', '/posts?format=rss', '/blog?format=rss'
         ]
         
-        async with aiohttp.ClientSession() as session:
-            for path in feed_paths:
-                try:
-                    test_url = urljoin(base_url, path)
-                    async with session.get(test_url, timeout=5) as response:
-                        if response.status == 200:
-                            content_type = response.headers.get('content-type', '')
-                            if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
-                                return test_url
-                            try:
-                                text = await response.text()
-                                if '<rss' in text.lower() or '<feed' in text.lower() or '<channel' in text.lower():
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                for path in feed_paths:
+                    try:
+                        test_url = urljoin(base_url, path)
+                        async with session.get(test_url) as response:
+                            if response.status == 200:
+                                content_type = response.headers.get('content-type', '')
+                                if 'xml' in content_type or 'rss' in content_type or 'atom' in content_type:
                                     return test_url
-                            except:
-                                pass
+                                try:
+                                    text = await response.text()
+                                    if '<rss' in text.lower() or '<feed' in text.lower() or '<channel' in text.lower():
+                                        return test_url
+                                except:
+                                    pass
+                    except:
+                        continue
+                
+                try:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            html = await response.text()
+                            soup = BeautifulSoup(html, 'html.parser')
+                            feed_links = soup.find_all('link', type=re.compile(r'application/(rss|atom)\+xml'))
+                            for link in feed_links:
+                                href = link.get('href')
+                                if href:
+                                    return urljoin(base_url, href)
                 except:
-                    continue
-            
-            try:
-                async with session.get(url, timeout=5) as response:
-                    if response.status == 200:
-                        html = await response.text()
-                        soup = BeautifulSoup(html, 'html.parser')
-                        feed_links = soup.find_all('link', type=re.compile(r'application/(rss|atom)\+xml'))
-                        for link in feed_links:
-                            href = link.get('href')
-                            if href:
-                                return urljoin(base_url, href)
-            except:
-                pass
+                    pass
+        except Exception as e:
+            logger.error(f"Feed detection error: {e}")
         
         return None
     
@@ -823,7 +763,7 @@ def get_or_create_user(update: Update) -> Dict:
         user = update.effective_user
         existing = db.get_user(user.id)
         if not existing:
-            db.create_user(user.id, user.username or '', user.first_name or '', 
+            db.create_user(user.id, user.username or '', user.first_name or '',
                           user.last_name or '', user.language_code or 'en')
             existing = db.get_user(user.id)
         return existing
@@ -840,7 +780,6 @@ def get_website_name(url: str) -> str:
     return name.capitalize()
 
 def format_post_preview(post: Dict) -> str:
-    """Format post for preview display"""
     text = f"📝 <b>{post['title']}</b>\n\n"
     text += f"{post['description'][:300]}...\n\n"
     text += f"🔗 <a href='{post['link']}'>Read More</a>\n"
@@ -868,14 +807,14 @@ def get_admin_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         ['📊 Statistics', '⏰ Pending Posts'],
         ['🔄 Reschedule Post', '📢 Broadcast'],
-        [BTN_BACK_TO_MENU]
+        [BACK_TO_MENU]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
 def get_post_action_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
         [BTN_SEND_NOW, BTN_SCHEDULE],
-        [BTN_BACK_TO_MENU]
+        [BACK_TO_MENU]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -1035,11 +974,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def set_timezone_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        user_id = update.effective_user.id
-        
         text = "⏰ <b>Set Your Timezone</b>\n\n"
         text += "Select your region to set your local timezone.\n\n"
-        text += "This ensures all scheduled posts are sent at the correct time in your local timezone.\n\n"
         text += "🌍 <b>Select your region:</b>"
         
         keyboard = [
@@ -1051,11 +987,7 @@ async def set_timezone_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         context.user_data['awaiting_timezone_region'] = True
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in set_timezone_start: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1106,14 +1038,13 @@ async def handle_timezone_region(update: Update, context: ContextTypes.DEFAULT_T
             
             await send_html(
                 update,
-                f"⏰ <b>Select your timezone:</b>\n\n"
-                f"Choose your city/region from the list below:",
+                "⏰ <b>Select your timezone:</b>",
                 reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             )
         else:
             await send_html(
                 update,
-                "❌ Please select a valid region from the buttons below.",
+                "❌ Please select a valid region.",
                 reply_markup=ReplyKeyboardMarkup([
                     ['🌍 Africa', '🌎 Americas'],
                     ['🌏 Asia', '🌏 Asia/Pacific'],
@@ -1149,17 +1080,16 @@ async def handle_timezone_selection(update: Update, context: ContextTypes.DEFAUL
             await send_html(
                 update,
                 f"✅ <b>Timezone Set Successfully!</b>\n\n"
-                f"🕐 Your Timezone: <code>{selected_tz}</code>\n"
-                f"📅 Current Date: {date_str}\n"
-                f"⏰ Current Time: {time_str}\n\n"
-                f"All scheduled posts will now use your local timezone!\n\n"
-                f"Use the menu below to continue:",
+                f"🕐 Timezone: <code>{selected_tz}</code>\n"
+                f"📅 Date: {date_str}\n"
+                f"⏰ Time: {time_str}\n\n"
+                f"All schedules will now use your local timezone!",
                 reply_markup=get_main_keyboard(user_id)
             )
         else:
             await send_html(
                 update,
-                "❌ Invalid timezone selected. Please try again.",
+                "❌ Invalid timezone. Please try again.",
                 reply_markup=ReplyKeyboardMarkup([['🌍 Africa', '🌎 Americas'], ['🌏 Asia', '🌏 Asia/Pacific'], ['🌍 Europe', '🌐 Other'], [CANCEL_BUTTON]], resize_keyboard=True)
             )
     except Exception as e:
@@ -1178,7 +1108,6 @@ async def websites_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         
         user_tz = get_user_timezone(user_id)
-        
         text = "🌐 <b>Your Websites</b>\n\n"
         for site in websites:
             text += f"✅ <b>{site['name']}</b>\n"
@@ -1187,11 +1116,10 @@ async def websites_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             text += f"   🕐 {site['schedule_time']} | 📊 {site['posts_per_day']}/day\n\n"
         
         text += f"\n⏰ Your Timezone: <code>{user_tz}</code>"
-        
         await send_html(update, text)
     except Exception as e:
         logger.error(f"Error in websites_command: {e}")
-        await send_html(update, "❌ An error occurred. Please try again later.")
+        await send_html(update, "❌ An error occurred. Please try again.")
 
 # ======================== CHANNELS ========================
 
@@ -1205,7 +1133,6 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         
         user_tz = get_user_timezone(user_id)
-        
         text = "📋 <b>Your Channels</b>\n\n"
         for channel in channels:
             text += f"✅ <b>{channel['channel_name']}</b>\n"
@@ -1214,11 +1141,10 @@ async def channels_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             text += f"   🆔 <code>{channel['channel_id']}</code>\n\n"
         
         text += f"\n⏰ Your Timezone: <code>{user_tz}</code>"
-        
         await send_html(update, text)
     except Exception as e:
         logger.error(f"Error in channels_command: {e}")
-        await send_html(update, "❌ An error occurred. Please try again later.")
+        await send_html(update, "❌ An error occurred. Please try again.")
 
 # ======================== DELETE WEBSITE ========================
 
@@ -1228,31 +1154,23 @@ async def delete_website_start(update: Update, context: ContextTypes.DEFAULT_TYP
         websites = db.get_user_websites(user_id)
         
         if not websites:
-            await send_html(
-                update,
-                "🌐 No websites to delete.\n\nClick 'Add Website' to add one!",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "🌐 No websites to delete.",
+                          reply_markup=get_main_keyboard(user_id))
             return
         
         text = "🗑 <b>Delete Website</b>\n\n"
-        text += "Select the website you want to delete by entering its number:\n\n"
+        text += "Select the website to delete by entering its number:\n\n"
         
         for i, site in enumerate(websites, 1):
             text += f"{i}. <b>{site['name']}</b>\n"
-            text += f"   🔗 {site['website_url']}\n"
-            text += f"   🆔 ID: <code>{site['id']}</code>\n\n"
+            text += f"   🔗 {site['website_url']}\n\n"
         
-        text += f"\n📝 Send the <b>website number</b> (e.g., 1, 2, 3...) or click {CANCEL_BUTTON}"
+        text += f"\n📝 Send the <b>website number</b> or click {CANCEL_BUTTON}"
         
         context.user_data['awaiting_website_delete'] = True
         context.user_data['websites_list'] = websites
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in delete_website_start: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1268,22 +1186,14 @@ async def handle_website_delete_selection(update: Update, context: ContextTypes.
             return
         
         if not text.isdigit():
-            await send_html(
-                update,
-                f"❌ Please enter a valid website number.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel")
             return
         
         website_index = int(text) - 1
         websites = context.user_data.get('websites_list', [])
         
         if website_index < 0 or website_index >= len(websites):
-            await send_html(
-                update,
-                f"❌ Invalid website number. Please try again.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid number. Click {CANCEL_BUTTON} to cancel")
             return
         
         selected_website = websites[website_index]
@@ -1291,23 +1201,15 @@ async def handle_website_delete_selection(update: Update, context: ContextTypes.
         context.user_data['awaiting_website_delete'] = False
         context.user_data['awaiting_website_delete_confirm'] = True
         
-        keyboard = [
-            ['✅ Yes, Delete'],
-            [CANCEL_BUTTON]
-        ]
+        keyboard = [[BTN_YES_DELETE], [CANCEL_BUTTON]]
         
         await send_html(
             update,
             f"🗑 <b>Delete Website</b>\n\n"
             f"Are you sure you want to delete <b>{selected_website['name']}</b>?\n\n"
-            f"🔗 {selected_website['website_url']}\n"
-            f"🆔 ID: <code>{selected_website['id']}</code>\n\n"
-            f"⚠️ <b>Warning:</b> This will stop all auto-posts from this website!\n"
-            f"Channels linked to this website will no longer receive posts.",
-            parse_mode='HTML',
+            f"⚠️ This will stop all auto-posts from this website!",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
-        
     except Exception as e:
         logger.error(f"Error in handle_website_delete_selection: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1322,37 +1224,21 @@ async def handle_website_delete_confirm(update: Update, context: ContextTypes.DE
             context.user_data.clear()
             return
         
-        if text == '✅ Yes, Delete':
+        if text == BTN_YES_DELETE:
             website_id = context.user_data.get('selected_website_delete')
-            
             if not website_id:
-                await send_html(update, "❌ No website selected. Please try again.", 
-                              reply_markup=get_main_keyboard(user_id))
+                await send_html(update, "❌ No website selected.", reply_markup=get_main_keyboard(user_id))
                 return
             
             success = db.delete_website(website_id, user_id)
+            context.user_data.clear()
             
             if success:
-                context.user_data.clear()
-                await send_html(
-                    update,
-                    f"✅ Website deleted successfully!\n\n"
-                    f"It will no longer auto-post to your channels.",
-                    reply_markup=get_main_keyboard(user_id)
-                )
+                await send_html(update, "✅ Website deleted successfully!", reply_markup=get_main_keyboard(user_id))
             else:
-                await send_html(
-                    update,
-                    "❌ Failed to delete website. Please try again.",
-                    reply_markup=get_main_keyboard(user_id)
-                )
+                await send_html(update, "❌ Failed to delete.", reply_markup=get_main_keyboard(user_id))
         else:
-            await send_html(
-                update,
-                "❌ Invalid option. Please select '✅ Yes, Delete' or '❌ Cancel'",
-                reply_markup=ReplyKeyboardMarkup([['✅ Yes, Delete'], [CANCEL_BUTTON]], resize_keyboard=True)
-            )
-        
+            await send_html(update, "❌ Please select Yes or Cancel", reply_markup=ReplyKeyboardMarkup([[BTN_YES_DELETE], [CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in handle_website_delete_confirm: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1365,16 +1251,11 @@ async def view_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         posts = db.get_posts_for_user(user_id, 50)
         
         if not posts:
-            await send_html(
-                update,
-                "📝 No posts found yet.\n\n"
-                "Add websites and wait for new content!",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "📝 No posts found yet.\n\nAdd websites and wait for new content!",
+                          reply_markup=get_main_keyboard(user_id))
             return
         
         user_tz = get_user_timezone(user_id)
-        
         text = "📝 <b>Your Posts</b>\n\n"
         for post in posts:
             date = post['published_at'][:10] if post['published_at'] else "Unknown"
@@ -1384,16 +1265,10 @@ async def view_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             text += f"{status} <b>#{post['user_post_id']}</b>{auto_sent}{sent_count}\n"
             text += f"📌 {post['title'][:40]}\n"
             text += f"   🌐 {post['website_name']}\n"
-            text += f"   📅 {date}\n"
-            text += f"   🖼 {'✅' if post['thumbnail_url'] else '❌'} Thumbnail\n\n"
+            text += f"   📅 {date}\n\n"
         
         text += f"\n⏰ Your Timezone: <code>{user_tz}</code>"
-        
-        await send_html(
-            update,
-            text[:4000],
-            reply_markup=get_main_keyboard(user_id)
-        )
+        await send_html(update, text[:4000], reply_markup=get_main_keyboard(user_id))
     except Exception as e:
         logger.error(f"Error in view_posts: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1406,12 +1281,8 @@ async def manage_posts_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         posts = db.get_posts_for_user(user_id, 30)
         
         if not posts:
-            await send_html(
-                update,
-                "📭 No posts available to manage.\n\n"
-                "Add websites and wait for content!",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "📭 No posts available.\n\nAdd websites and wait for content!",
+                          reply_markup=get_main_keyboard(user_id))
             return
         
         text = "📤 <b>Manage Posts</b>\n\n"
@@ -1420,19 +1291,12 @@ async def manage_posts_start(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         for post in posts[:15]:
             status_icon = "📌" if post['status'] == 'pending' else "✅"
-            auto_sent = " 🤖" if post.get('auto_sent', 0) == 1 else ""
-            text += f"{status_icon} <b>#{post['user_post_id']}</b>{auto_sent} - {post['title'][:40]}\n"
+            text += f"{status_icon} <b>#{post['user_post_id']}</b> - {post['title'][:40]}\n"
         
-        text += f"\n\n📝 <b>Send the Post ID number</b> (e.g., 1, 2, 3...)"
-        text += f"\n\nOr click <b>{CANCEL_BUTTON}</b> to go back"
+        text += f"\n\n📝 Send the <b>Post ID number</b> or click {CANCEL_BUTTON}"
         
         context.user_data['awaiting_post_id'] = True
-        
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in manage_posts_start: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1449,46 +1313,29 @@ async def handle_post_id_input(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         
         if not text.isdigit():
-            await send_html(
-                update,
-                f"❌ Please enter a valid Post ID number.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid Post ID. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         post_id = int(text)
-        
         post = db.get_post(user_id, post_id)
         
         if not post:
-            await send_html(
-                update,
-                f"❌ Post #{post_id} not found. Please enter a valid Post ID.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Post #{post_id} not found. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         context.user_data['selected_post_id'] = post_id
         context.user_data['selected_post'] = post
         context.user_data['awaiting_post_id'] = False
         
-        # Show post preview with image + title + description
         preview_text = format_post_preview(post)
         
         if post['thumbnail_url']:
-            await send_html_photo(
-                update,
-                photo=post['thumbnail_url'],
-                caption=preview_text,
-                reply_markup=get_post_action_keyboard()
-            )
+            await send_html_photo(update, photo=post['thumbnail_url'], caption=preview_text,
+                                reply_markup=get_post_action_keyboard())
         else:
-            await send_html(
-                update,
-                preview_text,
-                reply_markup=get_post_action_keyboard()
-            )
-        
+            await send_html(update, preview_text, reply_markup=get_post_action_keyboard())
     except Exception as e:
         logger.error(f"Error in handle_post_id_input: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1502,23 +1349,19 @@ async def handle_send_now(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         post = context.user_data.get('selected_post')
         
         if not post:
-            await send_html(update, "❌ No post selected. Please start over.", 
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ No post selected.", reply_markup=get_main_keyboard(user_id))
             return
         
         channels = db.get_user_channels(user_id)
         
         if not channels:
-            await send_html(
-                update,
-                "❌ No channels found. Add a channel first!",
-                reply_markup=get_post_action_keyboard()
-            )
+            await send_html(update, "❌ No channels found. Add a channel first!",
+                          reply_markup=get_post_action_keyboard())
             return
         
         text = f"📤 <b>Send Post #{post_id} to Channel</b>\n\n"
         text += f"📌 {post['title'][:50]}\n\n"
-        text += "Select a channel by clicking the button below:"
+        text += "Select a channel:"
         
         context.user_data['awaiting_channel_for_post'] = True
         context.user_data['post_action'] = 'send'
@@ -1529,17 +1372,12 @@ async def handle_send_now(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             keyboard.append([f"📢 {channel['channel_name'][:30]}"])
         keyboard.append(['🔙 Back'])
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in handle_send_now: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
 
-# ======================== SCHEDULE ========================
+# ======================== SCHEDULE POST ========================
 
 async def handle_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
@@ -1548,23 +1386,19 @@ async def handle_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYP
         post = context.user_data.get('selected_post')
         
         if not post:
-            await send_html(update, "❌ No post selected. Please start over.", 
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ No post selected.", reply_markup=get_main_keyboard(user_id))
             return
         
         channels = db.get_user_channels(user_id)
         
         if not channels:
-            await send_html(
-                update,
-                "❌ No channels found. Add a channel first!",
-                reply_markup=get_post_action_keyboard()
-            )
+            await send_html(update, "❌ No channels found. Add a channel first!",
+                          reply_markup=get_post_action_keyboard())
             return
         
         text = f"⏰ <b>Schedule Post #{post_id}</b>\n\n"
         text += f"📌 {post['title'][:50]}\n\n"
-        text += "Select a channel by clicking the button below:"
+        text += "Select a channel:"
         
         context.user_data['awaiting_channel_for_post'] = True
         context.user_data['post_action'] = 'schedule'
@@ -1575,12 +1409,7 @@ async def handle_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYP
             keyboard.append([f"📢 {channel['channel_name'][:30]}"])
         keyboard.append(['🔙 Back'])
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in handle_schedule_post: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1596,15 +1425,12 @@ async def handle_channel_selection(update: Update, context: ContextTypes.DEFAULT
         channels = context.user_data.get('channels_list', [])
         
         if not post:
-            await send_html(update, "❌ No post selected. Please start over.", 
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ No post selected.", reply_markup=get_main_keyboard(user_id))
             return
         
-        # Remove "📢 " prefix if present
         if channel_display.startswith('📢 '):
             channel_display = channel_display[2:].strip()
         
-        # Find the channel by matching display name
         selected_channel = None
         for channel in channels:
             if channel['channel_name'][:30] == channel_display or channel['channel_name'] == channel_display:
@@ -1622,36 +1448,23 @@ async def handle_channel_selection(update: Update, context: ContextTypes.DEFAULT
             for channel in channels:
                 keyboard.append([f"📢 {channel['channel_name'][:30]}"])
             keyboard.append(['🔙 Back'])
-            
-            await send_html(
-                update,
-                f"❌ Channel not found. Please select from the list.",
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
+            await send_html(update, "❌ Channel not found. Select from list:",
+                          reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
             return
         
         channel_id = selected_channel['channel_id']
         
         if action == 'send':
             try:
-                # Send the post with preview
                 message = f"📝 <b>{post['title']}</b>\n\n"
                 message += f"{post['description'][:300]}...\n\n"
                 message += f"🔗 <a href='{post['link']}'>Read More</a>"
                 
                 if post['thumbnail_url']:
-                    await context.bot.send_photo(
-                        chat_id=channel_id,
-                        photo=post['thumbnail_url'],
-                        caption=message,
-                        parse_mode='HTML'
-                    )
+                    await context.bot.send_photo(chat_id=channel_id, photo=post['thumbnail_url'],
+                                                caption=message, parse_mode='HTML')
                 else:
-                    await context.bot.send_message(
-                        chat_id=channel_id,
-                        text=message,
-                        parse_mode='HTML'
-                    )
+                    await context.bot.send_message(chat_id=channel_id, text=message, parse_mode='HTML')
                 
                 db.update_post_status(user_id, post_id, 'sent')
                 db.increment_post_sent_count(user_id, post_id)
@@ -1659,21 +1472,11 @@ async def handle_channel_selection(update: Update, context: ContextTypes.DEFAULT
                 db.mark_auto_sent(post['post_id'])
                 
                 context.user_data.clear()
-                
-                await send_html(
-                    update,
-                    f"✅ Post #{post_id} sent successfully to {selected_channel['channel_name']}!",
-                    reply_markup=get_main_keyboard(user_id)
-                )
-                
+                await send_html(update, f"✅ Post #{post_id} sent to {selected_channel['channel_name']}!",
+                              reply_markup=get_main_keyboard(user_id))
             except Exception as e:
-                error_msg = str(e)
-                logger.error(f"Error sending post: {error_msg}")
-                await send_html(
-                    update,
-                    f"❌ Error sending post: {error_msg[:100]}\n\nMake sure I'm in the channel.",
-                    reply_markup=get_main_keyboard(user_id)
-                )
+                logger.error(f"Error sending post: {e}")
+                await send_html(update, f"❌ Error: {str(e)[:100]}", reply_markup=get_main_keyboard(user_id))
         
         elif action == 'schedule':
             context.user_data['schedule_channel_id'] = channel_id
@@ -1687,13 +1490,12 @@ async def handle_channel_selection(update: Update, context: ContextTypes.DEFAULT
                 update,
                 f"⏰ <b>Schedule Post #{post_id}</b>\n\n"
                 f"📢 Channel: <code>{selected_channel['channel_name']}</code>\n\n"
-                f"Send the time (24-hour format) in <b>your local timezone</b>:\n"
-                f"⏰ Your Timezone: <code>{user_tz}</code>\n"
+                f"Send the time (24-hour format) in your local timezone:\n"
+                f"⏰ Timezone: <code>{user_tz}</code>\n"
                 f"Example: <code>14:30</code>\n\n"
-                f"Or click {CANCEL_BUTTON} to cancel",
+                f"Or click {CANCEL_BUTTON}",
                 reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
             )
-        
     except Exception as e:
         logger.error(f"Error in handle_channel_selection: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1705,19 +1507,14 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
         user_id = update.effective_user.id
         text = update.message.text.strip()
         
-        logger.info(f"Handling schedule time: {text} from user {user_id}")
-        
         if text == CANCEL_BUTTON:
-            await send_html(update, "❌ Scheduling cancelled.", reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
             context.user_data.clear()
             return
         
         if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', text):
-            await send_html(
-                update,
-                f"❌ Invalid time format. Use HH:MM (e.g., 14:30)\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid time. Use HH:MM (e.g., 14:30). Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         post_id = context.user_data.get('selected_post_id')
@@ -1725,8 +1522,7 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
         post = context.user_data.get('selected_post')
         
         if not post_id or not channel_id or not post:
-            await send_html(update, "❌ Missing data. Please start over.", 
-                          reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ Missing data. Start over.", reply_markup=get_main_keyboard(user_id))
             return
         
         user_tz = get_user_timezone(user_id)
@@ -1742,10 +1538,7 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
             
             scheduled_utc = scheduled_user.astimezone(pytz.UTC)
             scheduled_time_str = scheduled_utc.isoformat()
-            
             display_time = scheduled_user.strftime('%Y-%m-%d %H:%M')
-            display_tz = user_tz
-            
         except Exception as e:
             logger.error(f"Timezone error: {e}")
             now_utc = datetime.now(pytz.UTC)
@@ -1754,7 +1547,6 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
                 scheduled_utc += timedelta(days=1)
             scheduled_time_str = scheduled_utc.isoformat()
             display_time = scheduled_utc.strftime('%Y-%m-%d %H:%M')
-            display_tz = 'UTC'
         
         db.schedule_post(post['post_id'], channel_id, scheduled_time_str, priority=0)
         db.update_post_status(user_id, post_id, 'scheduled')
@@ -1763,16 +1555,14 @@ async def handle_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYP
         
         await send_html(
             update,
-            f"✅ <b>Post #{post_id} Scheduled Successfully!</b>\n\n"
+            f"✅ <b>Post #{post_id} Scheduled!</b>\n\n"
             f"📌 {post['title'][:50]}\n"
             f"📢 Channel: <code>{channel_id}</code>\n"
-            f"🕐 Time: <code>{text}</code> ({display_tz})\n"
-            f"📅 Date: <code>{display_time}</code>\n\n"
-            f"⏰ The post will be sent automatically at the scheduled time in your timezone.\n\n"
-            f"You will receive a notification 5 minutes before it's sent!",
+            f"🕐 Time: {text} ({user_tz})\n"
+            f"📅 Date: {display_time}\n\n"
+            f"You'll be notified 5 minutes before!",
             reply_markup=get_main_keyboard(user_id)
         )
-        
     except Exception as e:
         logger.error(f"Error in handle_schedule_time: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1787,8 +1577,7 @@ async def add_website_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "• <code>https://example.com</code>\n"
         "• <code>pspgamers5.blogspot.com</code>\n"
         "• <code>https://news.site/feed</code>\n\n"
-        "I'll automatically detect the RSS/Atom feed!\n\n"
-        "⚠️ Works with: WordPress, Blogger, Medium, Ghost, any RSS-enabled site",
+        "I'll auto-detect the RSS feed!",
         reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
     )
     return ADD_WEBSITE_URL
@@ -1804,15 +1593,12 @@ async def add_website_url(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not website_url.startswith('http'):
             website_url = 'https://' + website_url
         
-        await send_html(update, "🔍 Detecting feed for website...")
+        await send_html(update, "🔍 Detecting feed...")
         
         existing = db.get_website_by_url(update.effective_user.id, website_url)
         if existing:
-            await send_html(
-                update,
-                f"⚠️ This website is already added!\n\n🌐 {existing['name']}\n🆔 ID: <code>{existing['id']}</code>",
-                reply_markup=get_main_keyboard(update.effective_user.id)
-            )
+            await send_html(update, f"⚠️ Already added!\n🌐 {existing['name']}",
+                          reply_markup=get_main_keyboard(update.effective_user.id))
             return ConversationHandler.END
         
         feed_url = await detector.find_feed_url(website_url)
@@ -1823,34 +1609,30 @@ async def add_website_url(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             
             await send_html(
                 update,
-                f"✅ <b>Website Added Successfully!</b>\n\n"
+                f"✅ <b>Website Added!</b>\n\n"
                 f"🌐 <b>{name}</b>\n"
                 f"🔗 {website_url}\n"
                 f"📡 Feed: <code>{feed_url}</code>\n"
                 f"🆔 Website ID: <code>{website_id}</code>\n\n"
-                f"⏰ Default: 3 posts/day at 12:00\n\n"
-                f"Now add a channel to receive posts! 📤",
+                f"Now add a channel! 📤",
                 reply_markup=get_main_keyboard(update.effective_user.id)
             )
             
-            # Immediately check for new posts after adding website
+            # Immediately check for new posts
             await check_website_feed(website_id, update.effective_user.id)
             
             return ConversationHandler.END
         else:
             await send_html(
                 update,
-                "❌ <b>Could not find RSS/Atom feed</b>\n\n"
+                "❌ <b>Could not find RSS feed</b>\n\n"
                 "Try:\n"
-                "• Add <code>/feed</code> to the URL\n"
-                "• WordPress: <code>/feed/</code>\n"
-                "• Blogger: <code>/feeds/posts/default</code>\n"
+                "• Add <code>/feed</code> to URL\n"
                 "• Or send the feed URL directly\n\n"
                 f"Send another URL or click {CANCEL_BUTTON}",
                 reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
             )
             return ADD_WEBSITE_URL
-            
     except Exception as e:
         logger.error(f"Error in add_website_url: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1864,29 +1646,21 @@ async def add_channel_start(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         websites = db.get_user_websites(user_id)
         
         if not websites:
-            await send_html(
-                update,
-                "❌ Please add a website first! Click 'Add Website'.",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "❌ Add a website first!",
+                          reply_markup=get_main_keyboard(user_id))
             return ConversationHandler.END
         
-        text = "🌐 <b>Select which website this channel is for:</b>\n\n"
+        text = "🌐 <b>Select website for this channel:</b>\n\n"
         for i, site in enumerate(websites, 1):
             text += f"{i}. {site['name']} (ID: {site['id']})\n"
         
-        text += f"\n📝 Send the <b>website ID number</b> (e.g., 1, 2, 3...) or click {CANCEL_BUTTON}"
+        text += f"\n📝 Send the website number or click {CANCEL_BUTTON}"
         
         context.user_data['awaiting_website_selection'] = True
         context.user_data['websites_list'] = websites
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
         return ADD_CHANNEL_SELECT_WEBSITE
-        
     except Exception as e:
         logger.error(f"Error in add_channel_start: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1902,22 +1676,16 @@ async def select_website_for_channel(update: Update, context: ContextTypes.DEFAU
             return ConversationHandler.END
         
         if not text.isdigit():
-            await send_html(
-                update,
-                f"❌ Please enter a valid website ID number.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return ADD_CHANNEL_SELECT_WEBSITE
         
         website_index = int(text) - 1
         websites = context.user_data.get('websites_list', [])
         
         if website_index < 0 or website_index >= len(websites):
-            await send_html(
-                update,
-                f"❌ Invalid website ID. Please try again.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return ADD_CHANNEL_SELECT_WEBSITE
         
         website = websites[website_index]
@@ -1934,16 +1702,11 @@ async def select_website_for_channel(update: Update, context: ContextTypes.DEFAU
         await send_html(
             update,
             f"📤 <b>Add Channel</b>\n\n"
-            f"Selected Website: <b>{website['name']}</b>\n\n"
-            f"Choose how to add your channel:\n\n"
-            f"📤 <b>Forward:</b> Forward any message from your channel\n"
-            f"✏️ <b>@username:</b> Enter @channelname\n"
-            f"🔢 <b>ID:</b> Enter channel ID",
-            parse_mode='HTML',
+            f"Website: <b>{website['name']}</b>\n\n"
+            f"Choose method:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return ADD_CHANNEL_METHOD
-        
     except Exception as e:
         logger.error(f"Error in select_website_for_channel: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1961,15 +1724,11 @@ async def add_channel_forward(update: Update, context: ContextTypes.DEFAULT_TYPE
         await send_html(
             update,
             "📤 <b>Add Channel via Forward</b>\n\n"
-            "1. Go to your channel\n"
-            "2. Forward any message to me\n"
-            "3. I'll detect the channel automatically\n\n"
-            f"⚠️ Make sure I'm in the channel first!\n\nClick {CANCEL_BUTTON} to cancel",
-            parse_mode='HTML',
+            "Forward any message from your channel to me.\n\n"
+            f"⚠️ Make sure I'm in the channel!\n\nClick {CANCEL_BUTTON} to cancel",
             reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
         )
         return ADD_CHANNEL_FORWARD
-        
     except Exception as e:
         logger.error(f"Error in add_channel_forward: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -1988,13 +1747,11 @@ async def add_channel_username(update: Update, context: ContextTypes.DEFAULT_TYP
             update,
             "✏️ <b>Add Channel via @username</b>\n\n"
             "Send me the channel username:\n"
-            "• <code>@channel_name</code>\n\n"
-            f"⚠️ Make sure I'm in the channel first!\n\nClick {CANCEL_BUTTON} to cancel",
-            parse_mode='HTML',
+            "Example: <code>@channel_name</code>\n\n"
+            f"Click {CANCEL_BUTTON} to cancel",
             reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
         )
         return ADD_CHANNEL_MANUAL
-        
     except Exception as e:
         logger.error(f"Error in add_channel_username: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2013,13 +1770,11 @@ async def add_channel_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             update,
             "🔢 <b>Add Channel via ID</b>\n\n"
             "Send me the channel ID:\n"
-            "• <code>-1001234567890</code>\n\n"
-            f"⚠️ Make sure I'm in the channel first!\n\nClick {CANCEL_BUTTON} to cancel",
-            parse_mode='HTML',
+            "Example: <code>-1001234567890</code>\n\n"
+            f"Click {CANCEL_BUTTON} to cancel",
             reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
         )
         return ADD_CHANNEL_MANUAL
-        
     except Exception as e:
         logger.error(f"Error in add_channel_id: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2035,8 +1790,7 @@ async def process_channel_forward(update: Update, context: ContextTypes.DEFAULT_
         website_id = context.user_data.get('website_for_channel')
         
         if not website_id:
-            await send_html(update, "❌ No website selected. Please start over.", 
-                          reply_markup=get_main_keyboard(update.effective_user.id))
+            await send_html(update, "❌ No website selected.", reply_markup=get_main_keyboard(update.effective_user.id))
             return ConversationHandler.END
         
         if not update.message.forward_origin:
@@ -2053,23 +1807,20 @@ async def process_channel_forward(update: Update, context: ContextTypes.DEFAULT_
             website = db.get_website(website_id)
             await send_html(
                 update,
-                f"✅ <b>Channel Added Successfully!</b>\n\n"
+                f"✅ <b>Channel Added!</b>\n\n"
                 f"📢 {channel_name}\n"
                 f"🌐 {website['name'] if website else 'Unknown'}\n"
                 f"🆔 <code>{channel_id}</code>\n\n"
-                f"⏰ Auto-posts will start soon!",
+                f"Auto-posts will start immediately when new posts are detected!",
                 reply_markup=get_main_keyboard(update.effective_user.id)
             )
-            
             context.user_data.clear()
             return ConversationHandler.END
-            
         except Exception as e:
             logger.error(f"Error processing forward: {e}")
-            await send_html(update, f"❌ Failed to detect channel: {str(e)[:100]}", 
+            await send_html(update, f"❌ Failed: {str(e)[:100]}",
                           reply_markup=get_main_keyboard(update.effective_user.id))
             return ConversationHandler.END
-            
     except Exception as e:
         logger.error(f"Error in process_channel_forward: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2086,8 +1837,7 @@ async def process_channel_manual(update: Update, context: ContextTypes.DEFAULT_T
         channel_input = update.message.text.strip()
         
         if not website_id:
-            await send_html(update, "❌ No website selected. Please start over.",
-                          reply_markup=get_main_keyboard(update.effective_user.id))
+            await send_html(update, "❌ No website selected.", reply_markup=get_main_keyboard(update.effective_user.id))
             return ConversationHandler.END
         
         try:
@@ -2097,11 +1847,8 @@ async def process_channel_manual(update: Update, context: ContextTypes.DEFAULT_T
                     channel_id = str(chat.id)
                     channel_name = chat.title or channel_input
                 except Exception as e:
-                    await send_html(
-                        update,
-                        f"❌ Could not find channel {channel_input}. Make sure it exists and I'm in it.",
-                        reply_markup=get_main_keyboard(update.effective_user.id)
-                    )
+                    await send_html(update, f"❌ Could not find {channel_input}. Make sure I'm in it.",
+                                  reply_markup=get_main_keyboard(update.effective_user.id))
                     return ConversationHandler.END
             else:
                 try:
@@ -2118,25 +1865,19 @@ async def process_channel_manual(update: Update, context: ContextTypes.DEFAULT_T
             website = db.get_website(website_id)
             await send_html(
                 update,
-                f"✅ <b>Channel Added Successfully!</b>\n\n"
+                f"✅ <b>Channel Added!</b>\n\n"
                 f"📢 {channel_name}\n"
                 f"🌐 {website['name'] if website else 'Unknown'}\n"
                 f"🆔 <code>{channel_id}</code>\n\n"
-                f"⏰ Auto-posts will start soon!",
+                f"Auto-posts will start immediately when new posts are detected!",
                 reply_markup=get_main_keyboard(update.effective_user.id)
             )
-            
             context.user_data.clear()
             return ConversationHandler.END
-            
         except Exception as e:
-            await send_html(
-                update,
-                f"❌ Error: {str(e)[:100]}\n\nMake sure the channel exists and I'm in it.",
-                reply_markup=get_main_keyboard(update.effective_user.id)
-            )
+            await send_html(update, f"❌ Error: {str(e)[:100]}",
+                          reply_markup=get_main_keyboard(update.effective_user.id))
             return ConversationHandler.END
-            
     except Exception as e:
         logger.error(f"Error in process_channel_manual: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2150,30 +1891,21 @@ async def schedule_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         websites = db.get_user_websites(user_id)
         
         if not websites:
-            await send_html(
-                update,
-                "🌐 No websites found. Add a website first!",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "🌐 No websites found. Add one first!", reply_markup=get_main_keyboard(user_id))
             return
         
         user_tz = get_user_timezone(user_id)
-        
         text = "⏰ <b>Select website to adjust schedule:</b>\n\n"
         for i, site in enumerate(websites, 1):
             text += f"{i}. {site['name']} - 🕐 {site['schedule_time']} | 📊 {site['posts_per_day']}/day\n"
         
-        text += f"\n📝 Send the <b>website ID number</b> (e.g., 1, 2, 3...) or click {CANCEL_BUTTON}"
+        text += f"\n📝 Send website number or click {CANCEL_BUTTON}"
         text += f"\n\n⏰ Your Timezone: <code>{user_tz}</code>"
         
         context.user_data['awaiting_website_schedule'] = True
         context.user_data['websites_list'] = websites
         
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in schedule_settings: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2189,22 +1921,14 @@ async def handle_website_schedule_selection(update: Update, context: ContextType
             return
         
         if not text.isdigit():
-            await send_html(
-                update,
-                f"❌ Please enter a valid website ID number.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel")
             return
         
         website_index = int(text) - 1
         websites = context.user_data.get('websites_list', [])
         
         if website_index < 0 or website_index >= len(websites):
-            await send_html(
-                update,
-                f"❌ Invalid website ID. Please try again.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel")
             return
         
         website = websites[website_index]
@@ -2214,7 +1938,7 @@ async def handle_website_schedule_selection(update: Update, context: ContextType
         user_tz = get_user_timezone(user_id)
         
         keyboard = [
-            ['⏰ Set Time'],
+            [BTN_SET_TIME],
             [f'📊 Posts/Day: {website["posts_per_day"]}'],
             ['🔙 Back']
         ]
@@ -2226,13 +1950,11 @@ async def handle_website_schedule_selection(update: Update, context: ContextType
             f"🕐 Time: {website['schedule_time']}\n"
             f"📊 Posts/Day: {website['posts_per_day']}\n\n"
             f"⏰ Your Timezone: <code>{user_tz}</code>\n\n"
-            f"Select option to adjust:",
-            parse_mode='HTML',
+            f"Select option:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         
         context.user_data['awaiting_schedule_action'] = True
-        
     except Exception as e:
         logger.error(f"Error in handle_website_schedule_selection: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2248,17 +1970,16 @@ async def handle_schedule_action(update: Update, context: ContextTypes.DEFAULT_T
             await schedule_settings(update, context)
             return
         
-        if text == '⏰ Set Time':
+        if text == BTN_SET_TIME:
             user_tz = get_user_timezone(user_id)
             context.user_data['awaiting_schedule_time_set'] = True
             await send_html(
                 update,
                 f"⌚️ <b>Set Posting Time</b>\n\n"
-                f"Send the new time in 24-hour format in <b>your local timezone</b>:\n"
-                f"⏰ Your Timezone: <code>{user_tz}</code>\n"
+                f"Send new time (24h format) in your timezone:\n"
+                f"⏰ Timezone: <code>{user_tz}</code>\n"
                 f"Example: <code>14:30</code>\n\n"
-                f"Or click {CANCEL_BUTTON} to cancel",
-                parse_mode='HTML',
+                f"Or click {CANCEL_BUTTON}",
                 reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
             )
             return
@@ -2270,11 +1991,8 @@ async def handle_schedule_action(update: Update, context: ContextTypes.DEFAULT_T
                 ['🔙 Back']
             ]
             context.user_data['awaiting_posts_count'] = True
-            await send_html(
-                update,
-                "📊 <b>Select posts per day:</b>",
-                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            )
+            await send_html(update, "📊 <b>Select posts per day:</b>",
+                          reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
             return
         
         if context.user_data.get('awaiting_schedule_time_set'):
@@ -2284,18 +2002,15 @@ async def handle_schedule_action(update: Update, context: ContextTypes.DEFAULT_T
                 return
             
             if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', text):
-                await send_html(update, "❌ Invalid time format. Use HH:MM (e.g., 14:30)")
+                await send_html(update, "❌ Invalid time format. Use HH:MM")
                 return
             
             website = db.get_website(website_id)
             if website:
                 db.update_website_schedule(website_id, text, website['posts_per_day'])
                 context.user_data['awaiting_schedule_time_set'] = False
-                await send_html(
-                    update,
-                    f"✅ Schedule updated to {text} in your local timezone!",
-                    reply_markup=get_main_keyboard(user_id)
-                )
+                await send_html(update, f"✅ Schedule updated to {text}!",
+                              reply_markup=get_main_keyboard(user_id))
             return
         
         if context.user_data.get('awaiting_posts_count'):
@@ -2311,13 +2026,9 @@ async def handle_schedule_action(update: Update, context: ContextTypes.DEFAULT_T
                 if website:
                     db.update_website_schedule(website_id, website['schedule_time'], count)
                     context.user_data['awaiting_posts_count'] = False
-                    await send_html(
-                        update,
-                        f"✅ Updated! {count} posts per day",
-                        reply_markup=get_main_keyboard(user_id)
-                    )
+                    await send_html(update, f"✅ Updated! {count} posts per day",
+                                  reply_markup=get_main_keyboard(user_id))
             return
-        
     except Exception as e:
         logger.error(f"Error in handle_schedule_action: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2340,22 +2051,14 @@ async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 🌐 Active Websites: {total_websites}
 📢 Active Channels: {total_channels}
 
-📝 Total Posts Stored: {total_posts}
-⏳ Pending Posts: {pending_posts}
-✅ Posts Sent: {total_sent}
+📝 Total Posts: {total_posts}
+⏳ Pending: {pending_posts}
+✅ Sent: {total_sent}
 
-⏰ Check Interval: Every {CHECK_INTERVAL//60} minutes
-⚡ Auto-Post: Immediate
-
-━━━━━━━━━━━━━━━━━━━
-🔧 <b>Admin Panel</b>
+⏰ Check Interval: {CHECK_INTERVAL//60} minutes
+⚡ Auto-Post: IMMEDIATE
 """
-        
-        await send_html(
-            update,
-            text,
-            reply_markup=get_admin_keyboard()
-        )
+        await send_html(update, text, reply_markup=get_admin_keyboard())
     except Exception as e:
         logger.error(f"Error in admin_statistics: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2365,11 +2068,7 @@ async def view_pending_posts(update: Update, context: ContextTypes.DEFAULT_TYPE)
         pending = db.get_all_pending_posts()
         
         if not pending:
-            await send_html(
-                update,
-                "✅ No pending posts scheduled.",
-                reply_markup=get_admin_keyboard()
-            )
+            await send_html(update, "✅ No pending posts.", reply_markup=get_admin_keyboard())
             return
         
         text = "⏰ <b>Pending Posts</b>\n\n"
@@ -2382,22 +2081,15 @@ async def view_pending_posts(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     scheduled_dt = pytz.UTC.localize(scheduled_dt)
                 user_dt = scheduled_dt.astimezone(user_timezone)
                 time_display = user_dt.strftime('%Y-%m-%d %H:%M')
-                tz_display = user_tz
             except:
                 time_display = p['scheduled_time'][:16]
-                tz_display = 'UTC'
             
             text += f"📌 {p['title'][:30]}\n"
-            text += f"   🌐 {p['website_name']}\n"
             text += f"   📢 {p['channel_name']}\n"
-            text += f"   🕐 {time_display} ({tz_display})\n"
-            text += f"   🆔 Pending ID: <code>{p['id']}</code>\n\n"
+            text += f"   🕐 {time_display}\n"
+            text += f"   🆔 ID: <code>{p['id']}</code>\n\n"
         
-        await send_html(
-            update,
-            text[:4000],
-            reply_markup=get_admin_keyboard()
-        )
+        await send_html(update, text[:4000], reply_markup=get_admin_keyboard())
     except Exception as e:
         logger.error(f"Error in view_pending_posts: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2407,42 +2099,20 @@ async def reschedule_post_start(update: Update, context: ContextTypes.DEFAULT_TY
         pending = db.get_all_pending_posts()
         
         if not pending:
-            await send_html(
-                update,
-                "✅ No pending posts to reschedule.",
-                reply_markup=get_admin_keyboard()
-            )
+            await send_html(update, "✅ No pending posts.", reply_markup=get_admin_keyboard())
             return
         
         text = "🔄 <b>Reschedule Post</b>\n\n"
-        text += "Enter the <b>Pending ID</b> you want to reschedule:\n\n"
-        text += "📋 <b>Pending Posts:</b>\n"
+        text += "Enter the <b>Pending ID</b>:\n\n"
         
         for p in pending[:15]:
-            try:
-                user_tz = get_user_timezone(p['user_id'])
-                user_timezone = pytz.timezone(user_tz)
-                scheduled_dt = datetime.fromisoformat(p['scheduled_time'])
-                if scheduled_dt.tzinfo is None:
-                    scheduled_dt = pytz.UTC.localize(scheduled_dt)
-                user_dt = scheduled_dt.astimezone(user_timezone)
-                time_display = user_dt.strftime('%Y-%m-%d %H:%M')
-            except:
-                time_display = p['scheduled_time'][:16]
-            
             text += f"🆔 <b>{p['id']}</b> - {p['title'][:40]}\n"
-            text += f"   📢 {p['channel_name']} | 🕐 {time_display}\n\n"
+            text += f"   📢 {p['channel_name']}\n\n"
         
-        text += f"\n📝 <b>Send the Pending ID number</b>"
-        text += f"\n\nOr click {CANCEL_BUTTON} to go back"
+        text += f"\n📝 Send the ID or click {CANCEL_BUTTON}"
         
         context.user_data['awaiting_reschedule_id'] = True
-        
-        await send_html(
-            update,
-            text,
-            reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-        )
+        await send_html(update, text, reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     except Exception as e:
         logger.error(f"Error in reschedule_post_start: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2458,15 +2128,11 @@ async def handle_reschedule_id_input(update: Update, context: ContextTypes.DEFAU
             return
         
         if not text.isdigit():
-            await send_html(
-                update,
-                f"❌ Please enter a valid Pending ID number.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         pending_id = int(text)
-        
         pending = db.get_all_pending_posts()
         selected = None
         for p in pending:
@@ -2475,35 +2141,28 @@ async def handle_reschedule_id_input(update: Update, context: ContextTypes.DEFAU
                 break
         
         if not selected:
-            await send_html(
-                update,
-                f"❌ Pending ID {pending_id} not found.\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ ID {pending_id} not found. Click {CANCEL_BUTTON} to cancel",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         context.user_data['reschedule_pending_id'] = pending_id
-        
         user_tz = get_user_timezone(user_id)
         
         await send_html(
             update,
             f"🔄 <b>Reschedule Post</b>\n\n"
             f"📌 {selected['title']}\n"
-            f"🌐 {selected['website_name']}\n"
             f"📢 {selected['channel_name']}\n"
-            f"🕐 Current Time: {selected['scheduled_time'][:16]}\n\n"
-            f"Send the new time (24-hour format) in <b>your local timezone</b>:\n"
-            f"⏰ Your Timezone: <code>{user_tz}</code>\n"
+            f"🕐 Current: {selected['scheduled_time'][:16]}\n\n"
+            f"Send new time (24h format) in your timezone:\n"
+            f"⏰ Timezone: <code>{user_tz}</code>\n"
             f"Example: <code>14:30</code>\n\n"
-            f"Or click {CANCEL_BUTTON} to cancel",
-            parse_mode='HTML',
+            f"Or click {CANCEL_BUTTON}",
             reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
         )
         
         context.user_data['awaiting_new_time'] = True
         context.user_data['awaiting_reschedule_id'] = False
-        
     except Exception as e:
         logger.error(f"Error in handle_reschedule_id_input: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2521,16 +2180,13 @@ async def process_reschedule_time(update: Update, context: ContextTypes.DEFAULT_
         new_time = update.message.text.strip()
         
         if new_time == CANCEL_BUTTON:
-            await send_html(update, "❌ Reschedule cancelled.", reply_markup=get_admin_keyboard())
+            await send_html(update, "❌ Cancelled.", reply_markup=get_admin_keyboard())
             context.user_data.clear()
             return
         
         if not re.match(r'^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$', new_time):
-            await send_html(
-                update,
-                f"❌ Invalid time format. Use HH:MM (e.g., 14:30)\n\nClick {CANCEL_BUTTON} to cancel",
-                reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-            )
+            await send_html(update, f"❌ Invalid time. Use HH:MM",
+                          reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
             return
         
         user_tz = get_user_timezone(user_id)
@@ -2546,7 +2202,6 @@ async def process_reschedule_time(update: Update, context: ContextTypes.DEFAULT_
             
             scheduled_utc = scheduled_user.astimezone(pytz.UTC)
             scheduled_time_str = scheduled_utc.isoformat()
-            
         except Exception as e:
             logger.error(f"Timezone error: {e}")
             now_utc = datetime.now(pytz.UTC)
@@ -2556,15 +2211,8 @@ async def process_reschedule_time(update: Update, context: ContextTypes.DEFAULT_
             scheduled_time_str = scheduled_utc.isoformat()
         
         db.reschedule_post(pending_id, scheduled_time_str)
-        
-        await send_html(
-            update,
-            f"✅ Post rescheduled to {new_time} in your local timezone!",
-            reply_markup=get_admin_keyboard()
-        )
-        
+        await send_html(update, f"✅ Post rescheduled to {new_time}!", reply_markup=get_admin_keyboard())
         context.user_data.clear()
-        
     except Exception as e:
         logger.error(f"Error in process_reschedule_time: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2578,8 +2226,8 @@ async def broadcast_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await send_html(
         update,
         "📢 <b>Broadcast Message</b>\n\n"
-        "Send me the image for the broadcast (photo), or send /skip to continue without an image.\n\n"
-        f"Or click {CANCEL_BUTTON} to cancel.",
+        "Send image or /skip to continue without image.\n\n"
+        f"Click {CANCEL_BUTTON} to cancel.",
         reply_markup=ReplyKeyboardMarkup([['/skip', CANCEL_BUTTON]], resize_keyboard=True)
     )
     return BROADCAST_IMAGE
@@ -2594,18 +2242,15 @@ async def broadcast_image(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif update.message.text == '/skip':
         context.user_data['broadcast_image'] = None
     elif update.message.text == CANCEL_BUTTON:
-        await send_html(update, "❌ Broadcast cancelled.", reply_markup=get_admin_keyboard())
+        await send_html(update, "❌ Cancelled.", reply_markup=get_admin_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
     else:
-        await send_html(update, "Please send a photo or type /skip:")
+        await send_html(update, "Send photo or /skip:")
         return BROADCAST_IMAGE
     
-    await send_html(
-        update,
-        "Now send the caption for the broadcast (text message):",
-        reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-    )
+    await send_html(update, "Now send the caption:",
+                  reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     return BROADCAST_CAPTION
 
 async def broadcast_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2613,17 +2258,13 @@ async def broadcast_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     
     if update.message.text == CANCEL_BUTTON:
-        await send_html(update, "❌ Broadcast cancelled.", reply_markup=get_admin_keyboard())
+        await send_html(update, "❌ Cancelled.", reply_markup=get_admin_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
     
     context.user_data['broadcast_caption'] = update.message.text
-    
-    await send_html(
-        update,
-        "Now send the message text to broadcast:",
-        reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True)
-    )
+    await send_html(update, "Send the final message text:",
+                  reply_markup=ReplyKeyboardMarkup([[CANCEL_BUTTON]], resize_keyboard=True))
     return BROADCAST_CONFIRM
 
 async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2631,7 +2272,7 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return ConversationHandler.END
     
     if update.message.text == CANCEL_BUTTON:
-        await send_html(update, "❌ Broadcast cancelled.", reply_markup=get_admin_keyboard())
+        await send_html(update, "❌ Cancelled.", reply_markup=get_admin_keyboard())
         context.user_data.clear()
         return ConversationHandler.END
     
@@ -2643,52 +2284,24 @@ async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     image = context.user_data.get('broadcast_image')
     caption = context.user_data.get('broadcast_caption', '')
     
-    await send_html(
-        update,
-        f"📢 <b>Sending Broadcast...</b>\n\nTotal users: {total_users}\nProgress: 0/{total_users}",
-        parse_mode='HTML'
-    )
+    await send_html(update, f"📢 Sending to {total_users} users...")
     
     for i, user in enumerate(users):
         try:
             if image:
-                await context.bot.send_photo(
-                    chat_id=user['user_id'],
-                    photo=image,
-                    caption=caption,
-                    parse_mode='HTML'
-                )
+                await context.bot.send_photo(chat_id=user['user_id'], photo=image,
+                                            caption=caption, parse_mode='HTML')
             else:
-                await context.bot.send_message(
-                    chat_id=user['user_id'],
-                    text=caption,
-                    parse_mode='HTML'
-                )
+                await context.bot.send_message(chat_id=user['user_id'], text=caption, parse_mode='HTML')
             sent_count += 1
         except Exception as e:
             failed_count += 1
-            logger.error(f"Failed to send broadcast to {user['user_id']}: {e}")
-        
-        if (i + 1) % 10 == 0:
-            try:
-                await send_html(
-                    update,
-                    f"📢 <b>Sending Broadcast...</b>\n\nTotal users: {total_users}\nProgress: {i + 1}/{total_users}\n✅ Sent: {sent_count}\n❌ Failed: {failed_count}",
-                    parse_mode='HTML'
-                )
-            except:
-                pass
-        
+            logger.error(f"Failed to send to {user['user_id']}: {e}")
         await asyncio.sleep(0.05)
     
     db.save_broadcast(update.effective_user.id, image or '', caption, '', sent_count, failed_count)
-    
-    await send_html(
-        update,
-        f"✅ <b>Broadcast Complete!</b>\n\n📊 Total users: {total_users}\n✅ Sent: {sent_count}\n❌ Failed: {failed_count}",
-        parse_mode='HTML',
-        reply_markup=get_admin_keyboard()
-    )
+    await send_html(update, f"✅ Sent: {sent_count}, Failed: {failed_count}",
+                  reply_markup=get_admin_keyboard())
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -2699,67 +2312,48 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_id = update.effective_user.id
         text = update.message.text
         
-        # Check if we're in a conversation state
-        if context.user_data.get('awaiting_post_id') or \
-           context.user_data.get('awaiting_schedule_time') or \
-           context.user_data.get('awaiting_reschedule_id') or \
-           context.user_data.get('awaiting_new_time') or \
-           context.user_data.get('awaiting_time') or \
-           context.user_data.get('awaiting_website_selection') or \
-           context.user_data.get('awaiting_website_schedule') or \
-           context.user_data.get('awaiting_schedule_action') or \
-           context.user_data.get('awaiting_schedule_time_set') or \
-           context.user_data.get('awaiting_posts_count') or \
-           context.user_data.get('add_channel_method') or \
-           context.user_data.get('awaiting_website_delete') or \
-           context.user_data.get('awaiting_website_delete_confirm') or \
-           context.user_data.get('awaiting_timezone_region') or \
-           context.user_data.get('awaiting_timezone_selection') or \
-           context.user_data.get('awaiting_channel_for_post'):
-            logger.info(f"Ignoring text in conversation state: {text}")
+        # Skip if in conversation state
+        if any(context.user_data.get(k) for k in [
+            'awaiting_post_id', 'awaiting_schedule_time', 'awaiting_reschedule_id',
+            'awaiting_new_time', 'awaiting_website_selection', 'awaiting_website_schedule',
+            'awaiting_schedule_action', 'awaiting_schedule_time_set', 'awaiting_posts_count',
+            'add_channel_method', 'awaiting_website_delete', 'awaiting_website_delete_confirm',
+            'awaiting_timezone_region', 'awaiting_timezone_selection', 'awaiting_channel_for_post'
+        ]):
+            logger.info(f"Skipping menu handling for state text: {text}")
             return
         
         logger.info(f"Menu button: {text} by user {user_id}")
         
-        # Handle post action responses
+        # Post actions
         if text == BTN_SEND_NOW:
             if context.user_data.get('selected_post_id'):
                 await handle_send_now(update, context)
             else:
-                await send_html(update, "❌ No post selected. Please go back and select a post first.", 
-                              reply_markup=get_main_keyboard(user_id))
+                await send_html(update, "❌ No post selected.", reply_markup=get_main_keyboard(user_id))
             return
         
         if text == BTN_SCHEDULE:
             if context.user_data.get('selected_post_id'):
                 await handle_schedule_post(update, context)
             else:
-                await send_html(update, "❌ No post selected. Please go back and select a post first.", 
-                              reply_markup=get_main_keyboard(user_id))
+                await send_html(update, "❌ No post selected.", reply_markup=get_main_keyboard(user_id))
             return
         
-        if text == BTN_BACK_TO_MENU or text == '🔙 Back':
+        if text == BACK_TO_MENU or text == '🔙 Back':
             context.user_data.clear()
-            await send_html(
-                update,
-                "🌐 <b>Main Menu</b>",
-                reply_markup=get_main_keyboard(user_id)
-            )
+            await send_html(update, "🌐 <b>Main Menu</b>", reply_markup=get_main_keyboard(user_id))
             return
         
-        # Handle channel selection for sending/scheduling
+        # Channel selection
         if text.startswith('📢 ') and context.user_data.get('awaiting_channel_for_post'):
             channel_display = text.replace('📢 ', '').strip()
             await handle_channel_selection(update, context, channel_display)
             return
         
-        # Handle main menu options
+        # Main menu
         if text == BTN_ADMIN_PANEL and is_admin(user_id):
-            await send_html(
-                update,
-                "🔧 <b>Admin Panel</b>\n\nSelect an option below:",
-                reply_markup=get_admin_keyboard()
-            )
+            await send_html(update, "🔧 <b>Admin Panel</b>", reply_markup=get_admin_keyboard())
             return
         
         if text == BTN_MY_WEBSITES:
@@ -2818,7 +2412,6 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if text == '📢 Broadcast' and is_admin(user_id):
             await broadcast_start(update, context)
             return
-            
     except Exception as e:
         logger.error(f"Error in handle_menu: {e}")
         await send_html(update, "❌ An error occurred. Please try again.")
@@ -2826,7 +2419,7 @@ async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 # ======================== AUTO-POST ENGINE ========================
 
 async def check_website_feed(website_id: int, user_id: int):
-    """Check a single website's feed and auto-post new posts immediately"""
+    """Check feed and IMMEDIATELY auto-post new posts"""
     website = db.get_website(website_id)
     if not website:
         return
@@ -2849,126 +2442,101 @@ async def check_website_feed(website_id: int, user_id: int):
             post_id = f"post_{int(datetime.now().timestamp())}_{random.randint(1000, 9999)}"
             post_data['post_id'] = post_id
             
-            # Check if post already exists
             existing = db.get_post_by_post_id(post_id)
             if not existing:
                 saved_post = db.save_blog_post(post_data, user_id, website_id)
                 if saved_post:
                     new_posts.append(saved_post)
-                    logger.info(f"🔔 NEW POST DETECTED: {post_data['title']} (User: {user_id})")
+                    logger.info(f"🔔 NEW POST: {post_data['title']} (User: {user_id})")
         
         db.update_website_last_checked(website_id)
         
-        # Auto-post new posts immediately to channels
         if new_posts:
             channels = db.get_website_channels(website_id)
             
             if channels:
                 for post in new_posts:
-                    # Send to all channels for this website
                     for channel in channels:
-                        await auto_send_post_to_channel(post, channel, user_id, website)
-                    
-                    # Mark as auto-sent
+                        await auto_send_post_to_channel(post, channel, user_id)
                     db.mark_auto_sent(post['post_id'])
                 
-                logger.info(f"✅ Auto-posted {len(new_posts)} new posts from {website['name']} to {len(channels)} channels")
+                logger.info(f"✅ Auto-posted {len(new_posts)} posts to {len(channels)} channels")
             else:
-                logger.info(f"⚠️ No channels found for {website['name']} - posts saved but not sent")
+                logger.info(f"⚠️ No channels for {website['name']} - posts saved only")
             
-            # Notify user about new posts
+            # Notify user
             await notify_user_new_posts(user_id, new_posts, website)
-        
     except Exception as e:
-        logger.error(f"Error checking feed for {website['name']}: {e}")
+        logger.error(f"Error checking feed: {e}")
 
-async def auto_send_post_to_channel(post: Dict, channel: Dict, user_id: int, website: Dict):
-    """Auto-send a post to a channel immediately"""
+async def auto_send_post_to_channel(post: Dict, channel: Dict, user_id: int):
+    """Send post IMMEDIATELY to channel"""
     try:
         message = f"📝 <b>{post['title']}</b>\n\n"
         message += f"{post['description'][:300]}...\n\n"
         message += f"🔗 <a href='{post['link']}'>Read More</a>"
         
         if post['thumbnail_url']:
-            await context.bot.send_photo(
-                chat_id=channel['channel_id'],
-                photo=post['thumbnail_url'],
-                caption=message,
-                parse_mode='HTML'
-            )
+            await context.bot.send_photo(chat_id=channel['channel_id'], photo=post['thumbnail_url'],
+                                        caption=message, parse_mode='HTML')
         else:
-            await context.bot.send_message(
-                chat_id=channel['channel_id'],
-                text=message,
-                parse_mode='HTML'
-            )
+            await context.bot.send_message(chat_id=channel['channel_id'], text=message, parse_mode='HTML')
         
-        # Update post status
         db.update_post_status(user_id, post['user_post_id'], 'sent')
         db.increment_post_sent_count(user_id, post['user_post_id'])
         db.mark_as_posted(post['post_id'], channel['channel_id'])
         
         logger.info(f"📤 Auto-posted: {post['title']} to {channel['channel_name']}")
-        
     except Exception as e:
-        logger.error(f"Error auto-sending post to {channel['channel_name']}: {e}")
+        logger.error(f"Error auto-sending to {channel['channel_name']}: {e}")
 
 async def notify_user_new_posts(user_id: int, posts: List, website: Dict):
-    """Notify user about new posts that were auto-posted"""
+    """Notify user about new posts"""
     try:
         user_tz = get_user_timezone(user_id)
-        user_timezone = pytz.timezone(user_tz) if user_tz else pytz.UTC
-        current_time = datetime.now(user_timezone)
-        time_str = current_time.strftime('%I:%M %p')
-        date_str = current_time.strftime('%B %d, %Y')
+        try:
+            user_timezone = pytz.timezone(user_tz)
+            current_time = datetime.now(user_timezone)
+            time_str = current_time.strftime('%I:%M %p')
+        except:
+            time_str = datetime.now().strftime('%I:%M %p')
         
-        for post in posts[:3]:  # Show first 3 posts
+        for post in posts[:3]:
             text = f"🔔 <b>New Post Detected & Auto-Posted!</b>\n\n"
             text += f"🌐 <b>{website['name']}</b>\n"
             text += f"📝 <b>{post['title']}</b>\n\n"
             text += f"{post['description'][:200]}...\n\n"
             text += f"🆔 Post #{post['user_post_id']}\n"
-            text += f"📤 Auto-sent to all your channels\n"
-            text += f"🕐 {time_str} - {date_str}\n\n"
+            text += f"📤 Sent to all channels\n"
+            text += f"🕐 {time_str}\n\n"
             text += f"🔗 <a href='{post['link']}'>Read Full Post</a>"
             
-            if post['thumbnail_url']:
-                await context.bot.send_photo(
-                    chat_id=user_id,
-                    photo=post['thumbnail_url'],
-                    caption=text,
-                    parse_mode='HTML'
-                )
-            else:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=text,
-                    parse_mode='HTML'
-                )
-            
-            # Mark as notified
-            db.mark_post_notified_user(post['post_id'])
-            
-            await asyncio.sleep(0.5)
-            
+            try:
+                if post['thumbnail_url']:
+                    await context.bot.send_photo(chat_id=user_id, photo=post['thumbnail_url'],
+                                                caption=text, parse_mode='HTML')
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=text, parse_mode='HTML')
+                
+                db.mark_post_notified_user(post['post_id'])
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.error(f"Failed to notify user {user_id}: {e}")
     except Exception as e:
-        logger.error(f"Error notifying user {user_id} about new posts: {e}")
+        logger.error(f"Error in notify_user_new_posts: {e}")
 
 async def check_all_feeds():
-    """Check all websites' feeds"""
     websites = db.get_all_websites()
-    
     for website in websites:
-        user_id = website['user_id']
-        await check_website_feed(website['id'], user_id)
-        await asyncio.sleep(2)  # Small delay between websites
+        await check_website_feed(website['id'], website['user_id'])
+        await asyncio.sleep(2)
 
 # ======================== BACKGROUND TASKS ========================
 
 async def auto_check_all_feeds():
     while True:
         try:
-            logger.info("🔄 Scanning all feeds for new posts...")
+            logger.info("🔄 Scanning feeds...")
             await check_all_feeds()
         except Exception as e:
             logger.error(f"Auto-check error: {e}")
@@ -2985,18 +2553,10 @@ async def pending_posts_loop():
                     message += f"🔗 <a href='{post['link']}'>Read More</a>"
                     
                     if post['thumbnail_url']:
-                        await context.bot.send_photo(
-                            chat_id=post['channel_id'],
-                            photo=post['thumbnail_url'],
-                            caption=message,
-                            parse_mode='HTML'
-                        )
+                        await context.bot.send_photo(chat_id=post['channel_id'], photo=post['thumbnail_url'],
+                                                    caption=message, parse_mode='HTML')
                     else:
-                        await context.bot.send_message(
-                            chat_id=post['channel_id'],
-                            text=message,
-                            parse_mode='HTML'
-                        )
+                        await context.bot.send_message(chat_id=post['channel_id'], text=message, parse_mode='HTML')
                     
                     user_id = post['user_id']
                     db.update_post_status(user_id, post['user_post_id'], 'sent')
@@ -3004,14 +2564,13 @@ async def pending_posts_loop():
                     db.mark_as_posted(post['post_id'], post['channel_id'])
                     db.mark_auto_sent(post['post_id'])
                     
-                    logger.info(f"📤 Scheduled post sent: {post['title']} to {post['channel_name']}")
+                    logger.info(f"📤 Scheduled post sent: {post['title']}")
                     await asyncio.sleep(1)
-                    
                 except Exception as e:
                     logger.error(f"Failed to send scheduled post: {e}")
         except Exception as e:
-            logger.error(f"Pending posts loop error: {e}")
-        await asyncio.sleep(60)  # Check every minute
+            logger.error(f"Pending posts error: {e}")
+        await asyncio.sleep(60)
 
 # ======================== MESSAGE HANDLER ========================
 
@@ -3019,22 +2578,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     text = update.message.text
     user_id = update.effective_user.id
     
-    logger.info(f"Text handler received: {text} from user {user_id}")
+    logger.info(f"Text handler: {text} from user {user_id}")
     
     if text == CANCEL_BUTTON:
         if context.user_data.get('awaiting_post_id'):
             await cancel_manage_posts(update, context)
             return
         elif context.user_data.get('awaiting_schedule_time'):
-            await send_html(update, "❌ Scheduling cancelled.", reply_markup=get_main_keyboard(user_id))
+            await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
             context.user_data.clear()
             return
         elif context.user_data.get('awaiting_reschedule_id') or context.user_data.get('awaiting_new_time'):
             await cancel_reschedule(update, context)
             return
-        elif context.user_data.get('awaiting_website_selection') or context.user_data.get('awaiting_website_schedule') or \
-             context.user_data.get('awaiting_schedule_action') or context.user_data.get('awaiting_schedule_time_set') or \
-             context.user_data.get('awaiting_posts_count'):
+        elif any(context.user_data.get(k) for k in ['awaiting_website_selection', 'awaiting_website_schedule', 'awaiting_schedule_action', 'awaiting_schedule_time_set', 'awaiting_posts_count']):
             await cancel_schedule_settings(update, context)
             return
         elif context.user_data.get('add_channel_method'):
@@ -3044,19 +2601,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             context.user_data.clear()
             await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
             return
-        elif context.user_data.get('awaiting_website_delete') or context.user_data.get('awaiting_website_delete_confirm'):
-            await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
-            context.user_data.clear()
-            return
-        elif context.user_data.get('awaiting_timezone_region') or context.user_data.get('awaiting_timezone_selection'):
-            await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
-            context.user_data.clear()
-            return
         else:
             await send_html(update, "❌ Cancelled.", reply_markup=get_main_keyboard(user_id))
             context.user_data.clear()
             return
     
+    # Route based on state
     if context.user_data.get('awaiting_timezone_region'):
         await handle_timezone_region(update, context)
         return
@@ -3123,27 +2673,44 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 # ======================== MAIN FUNCTION ========================
 
+async def post_init(application: Application) -> None:
+    """Start background tasks after bot initialization"""
+    asyncio.create_task(auto_check_all_feeds())
+    asyncio.create_task(pending_posts_loop())
+    logger.info("✅ Background tasks started")
+
 def main():
     if not BOT_TOKEN or BOT_TOKEN == 'YOUR_BOT_TOKEN_HERE':
-        print("❌ ERROR: Please set your BOT_TOKEN in the .env file")
+        print("❌ ERROR: Please set your BOT_TOKEN in env vars")
         return
     
     if os.name == 'nt':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    application = Application.builder().token(BOT_TOKEN).build()
+    # Build application with LONG timeouts for Render
+    application = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
+        .write_timeout(30.0)
+        .pool_timeout(30.0)
+        .get_updates_connect_timeout(30.0)
+        .get_updates_read_timeout(30.0)
+        .post_init(post_init)
+        .build()
+    )
     
     global context
     context = application
     
     application.add_handler(CommandHandler("start", start_command))
     
+    # Add Website conversation
     add_website_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(f'^{BTN_ADD_WEBSITE}$'), add_website_start)],
         states={
-            ADD_WEBSITE_URL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, add_website_url)
-            ],
+            ADD_WEBSITE_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_website_url)],
         },
         fallbacks=[
             MessageHandler(filters.Regex(f'^{CANCEL_BUTTON}$'), cancel_add_website),
@@ -3152,12 +2719,11 @@ def main():
     )
     application.add_handler(add_website_conv)
     
+    # Add Channel conversation
     add_channel_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(f'^{BTN_ADD_CHANNEL}$'), add_channel_start)],
         states={
-            ADD_CHANNEL_SELECT_WEBSITE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, select_website_for_channel)
-            ],
+            ADD_CHANNEL_SELECT_WEBSITE: [MessageHandler(filters.TEXT & ~filters.COMMAND, select_website_for_channel)],
             ADD_CHANNEL_METHOD: [
                 MessageHandler(filters.Regex('^📤 Add via Forward$'), add_channel_forward),
                 MessageHandler(filters.Regex('^✏️ Enter @username$'), add_channel_username),
@@ -3168,9 +2734,7 @@ def main():
                 MessageHandler(filters.FORWARDED, process_channel_forward),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_channel_forward)
             ],
-            ADD_CHANNEL_MANUAL: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_channel_manual)
-            ]
+            ADD_CHANNEL_MANUAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_channel_manual)]
         },
         fallbacks=[
             MessageHandler(filters.Regex(f'^{CANCEL_BUTTON}$'), cancel_add_channel),
@@ -3179,6 +2743,7 @@ def main():
     )
     application.add_handler(add_channel_conv)
     
+    # Broadcast conversation
     broadcast_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex('^📢 Broadcast$'), broadcast_start)],
         states={
@@ -3200,19 +2765,25 @@ def main():
     )
     application.add_handler(broadcast_conv)
     
+    # Main text handler (must be last)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    print(f"🌐 {BOT_NAME} started successfully!")
+    print(f"🌐 {BOT_NAME} starting...")
     print(f"👥 Admins: {ADMIN_IDS}")
     print(f"⏰ Check interval: {CHECK_INTERVAL} seconds")
-    print(f"⚡ Auto-Post: IMMEDIATE - New posts will be sent to channels instantly")
-    print("Press Ctrl+C to stop")
+    print(f"⚡ Auto-Post: IMMEDIATE")
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(auto_check_all_feeds())
-    loop.create_task(pending_posts_loop())
-    
-    application.run_polling()
+    # Retry loop for network errors
+    while True:
+        try:
+            application.run_polling(
+                allowed_updates=['message', 'callback_query'],
+                drop_pending_updates=True
+            )
+            break
+        except Exception as e:
+            logger.error(f"⚠️ Bot crashed: {e}. Restarting in 10 seconds...")
+            time.sleep(10)
 
 if __name__ == '__main__':
     main()
